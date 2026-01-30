@@ -19,19 +19,19 @@ jobs:
       with:
         go-version: "1.25.x"
         check-latest: true
-        cache: true
+        #cache: true
 
     - name: Build
-      run: CGO_ENABLED=0 GOARCH=amd64 GOAMD64=v3 go build -trimpath -ldflags "-s -w" -mod=mod -o /usr/local/bin/dhparam dhparam.go
+      run: go env && CGO_ENABLED=0 GOARCH=amd64 GOAMD64=v3 go build -trimpath -ldflags "-s -w" -mod=mod -o /usr/local/bin/dhparam dhparam.go
 
     - name: Test
       run: |
         for i in $(seq 1 4); do 
             time dhparam -T $(nproc) -out /tmp/dhparam$(($i * 1024)).pem  $(($i * 1024))
-            sleep 5
+            sleep 2
             echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
             echo "Checking dhparam$(($i * 1024)).pem"
             openssl dhparam -check -text -noout -in /tmp/dhparam$(($i * 1024)).pem 2>&1
-            sleep 5
+            sleep 2
             echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
         done
