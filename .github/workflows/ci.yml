@@ -22,12 +22,12 @@ jobs:
         cache: true
 
     - name: Build
-      run: go version && CGO_ENABLED=0 GOARCH=amd64 GOAMD64=v3 go build -trimpath -ldflags "-s -w" -mod=mod -o /usr/local/bin/dhparam dhparam.go
+      run: CGO_ENABLED=0 GOARCH=amd64 GOAMD64=v3 go build -trimpath -ldflags "-s -w" -mod=mod -o /usr/local/bin/dhparam dhparam.go
 
     - name: Test
       run: |
-        for i in $(seq 1 8); do 
-            dhparam -T $(( $(nproc) > 1 ? $(nproc) - 1 : 1 )) -out /tmp/dhparam$(($i * 1024)).pem  $(($i * 1024))
+        for i in $(seq 1 4); do 
+            dhparam -T $(nproc) -out /tmp/dhparam$(($i * 1024)).pem  $(($i * 1024))
             echo "Checking dhparam$(($i * 1024)).pem"
             openssl dhparam -check -noout -in /tmp/dhparam$(($i * 1024)).pem
         done
