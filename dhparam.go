@@ -45,20 +45,21 @@ func isSafePrime(p *big.Int, qAlreadyPrime bool) (q *big.Int, isSafe bool) {
 	q = new(big.Int).Sub(p, one)
 	q.Div(q, two)
 	
-	// Use ProbablyPrime with sufficient iterations
-	// 20 iterations is enough for cryptographic purposes
-	// Error probability: 4^(-20) ≈ 2^(-40) ≈ 10^(-12)
-	const primTestIterations = 20
+	// Use different iteration counts based on context
+	// For p (the actual safe prime we're generating): use high iterations for security
+	// For q (already from rand.Prime): fewer iterations if we need to double-check
+	const pIterations = 64 // For p: cryptographic strength
+	const qIterations = 20 // For q: sufficient when double-checking rand.Prime output
 	
 	// If q was already verified by rand.Prime(), skip its test
 	if !qAlreadyPrime {
-		if !q.ProbablyPrime(primTestIterations) {
+		if !q.ProbablyPrime(qIterations) {
 			return nil, false
 		}
 	}
 	
-	// Check if p is prime (this is the expensive test)
-	if !p.ProbablyPrime(primTestIterations) {
+	// Check if p is prime (this is the expensive test we must always do)
+	if !p.ProbablyPrime(pIterations) {
 		return nil, false
 	}
 	
@@ -89,6 +90,17 @@ var smallPrimes = []int64{
 	1583, 1597, 1601, 1607, 1609, 1613, 1619,
 }
 
+// Pre-computed big.Int versions of small primes to avoid repeated allocations
+var smallPrimesBig map[int64]*big.Int
+
+func init() {
+	// Pre-compute big.Int versions of small primes
+	smallPrimesBig = make(map[int64]*big.Int, len(smallPrimes))
+	for _, p := range smallPrimes {
+		smallPrimesBig[p] = big.NewInt(p)
+	}
+}
+
 type Options struct {
 	InFile     string
 	OutFile    string
@@ -111,11 +123,6 @@ type DHParams struct {
 	Q              *big.Int // Optional subprime (for DSA compatibility)
 	PrivateLength  int      // Optional recommended private key length in bits
 }
-
-var (
-	// Pre-computed safe primes for common bit sizes (optional optimization)
-	knownPrimes = make(map[int]*DHParams)
-)
 
 func main() {
 	opts := parseFlags()
@@ -250,15 +257,25 @@ func run(opts *Options) error {
 // Returns false if n might be prime (needs further testing)
 // This eliminates >90% of composite candidates before expensive Miller-Rabin test
 func isProbablyComposite(n *big.Int) bool {
+	// Handle special cases
+	if n.Sign() <= 0 {
+		return true // negative or zero
+	}
+	
+	two := big.NewInt(2)
+	if n.Cmp(two) == 0 {
+		return false // 2 is prime
+	}
+	
 	// Quick check for even numbers
 	if n.Bit(0) == 0 {
-		return true // even number (except 2)
+		return true // even number (not 2)
 	}
 
 	// Test divisibility by small primes
 	// This is much faster than Miller-Rabin and eliminates most composites
 	for _, p := range smallPrimes {
-		prime := big.NewInt(p)
+		prime := smallPrimesBig[p]
 		
 		// If n equals the small prime, it's prime
 		if n.Cmp(prime) == 0 {
@@ -573,11 +590,25 @@ func readDHParams(filename, format string) (*DHParams, error) {
 	var derBytes []byte
 
 	if format == "PEM" || format == "pem" {
-		block, _ := pem.Decode(data)
-		if block == nil {
-			return nil, fmt.Errorf("failed to decode PEM block")
+		// Loop through PEM blocks to find DH PARAMETERS
+		for {
+			block, rest := pem.Decode(data)
+			if block == nil {
+				return nil, fmt.Errorf("failed to find DH PARAMETERS in PEM data")
+			}
+			
+			// Look for DH PARAMETERS block type
+			if block.Type == "DH PARAMETERS" {
+				derBytes = block.Bytes
+				break
+			}
+			
+			// Continue with remaining data
+			data = rest
+			if len(data) == 0 {
+				return nil, fmt.Errorf("no DH PARAMETERS block found")
+			}
 		}
-		derBytes = block.Bytes
 	} else {
 		derBytes = data
 	}
@@ -724,12 +755,36 @@ func checkDHParams(params *DHParams) error {
 		return fmt.Errorf("generator G is not in valid range (1 < G < P)")
 	}
 
-	// Basic validation passed - P is prime and G is in valid range
-	// This is sufficient for DH parameters to be considered valid
-	// 
-	// Note: OpenSSL performs additional checks for safe primes and generator order,
-	// but those are not required for DH parameters to be mathematically valid.
-	// Safe primes (P = 2Q + 1 where Q is also prime) are recommended but not mandatory.
+	// For safe primes with known Q, verify generator order
+	if params.Q != nil {
+		// Verify Q is prime
+		if !params.Q.ProbablyPrime(20) {
+			return fmt.Errorf("Q is not prime")
+		}
+		
+		// Verify P = 2Q + 1
+		two := big.NewInt(2)
+		expectedP := new(big.Int).Mul(params.Q, two)
+		expectedP.Add(expectedP, one)
+		if params.P.Cmp(expectedP) != 0 {
+			return fmt.Errorf("P != 2Q + 1")
+		}
+		
+		// Verify generator order: G^Q mod P should NOT equal 1
+		// This ensures G generates the full subgroup of order Q
+		result := new(big.Int).Exp(params.G, params.Q, params.P)
+		if result.Cmp(one) == 0 {
+			return fmt.Errorf("generator G has incorrect order (G^Q mod P = 1)")
+		}
+		
+		// Additional check: G^(2Q) mod P should equal 1 (G^(P-1) mod P = 1 by Fermat)
+		pMinus1 := new(big.Int).Sub(params.P, one)
+		result = new(big.Int).Exp(params.G, pMinus1, params.P)
+		if result.Cmp(one) != 0 {
+			return fmt.Errorf("generator G fails Fermat test (G^(P-1) mod P != 1)")
+		}
+	}
 
+	// Basic validation passed
 	return nil
 }
