@@ -179,6 +179,14 @@ func parseFlags() *Options {
 	if opts.Threads < 1 {
 		opts.Threads = 1
 	}
+	
+	// Limit threads to reasonable maximum to avoid excessive goroutine creation
+	// Generally, more threads than 4x CPU cores shows diminishing returns
+	maxThreads := 256 // Absolute maximum
+	if opts.Threads > maxThreads {
+		fmt.Fprintf(os.Stderr, "Warning: limiting threads from %d to %d\n", opts.Threads, maxThreads)
+		opts.Threads = maxThreads
+	}
 
 	return opts
 }
@@ -365,8 +373,11 @@ func generateSafePrimeWithContext(ctx context.Context, bits int, callback Progre
 		// Small prime sieve: quick test to eliminate >90% of composites
 		if isProbablyComposite(p) {
 			sieveRejected++
-			if callback != nil {
+			if callback != nil && attempts%1000 == 0 {
 				callback(attempts, sieveRejected)
+			}
+			if verbose && attempts%1000 == 0 {
+				fmt.Fprintf(os.Stderr, ".")
 			}
 			continue
 		}
@@ -385,8 +396,11 @@ func generateSafePrimeWithContext(ctx context.Context, bits int, callback Progre
 			return p, qVerified, nil
 		}
 
-		if callback != nil {
+		if callback != nil && attempts%100 == 0 {
 			callback(attempts, sieveRejected)
+		}
+		if verbose && attempts%100 == 0 {
+			fmt.Fprintf(os.Stderr, ".")
 		}
 	}
 }
@@ -410,9 +424,40 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 
 	var wg sync.WaitGroup
 
-	// Shared counters using atomic operations
+	// Precise counters using atomic operations
 	var totalAttempts atomic.Int64
 	var totalSieveRejected atomic.Int64
+
+	// Progress reporting goroutine (centralized output to avoid混乱)
+	progressDone := make(chan struct{})
+	if verbose || callback != nil {
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			lastAttempts := int64(0)
+			
+			for {
+				select {
+				case <-ticker.C:
+					attempts := totalAttempts.Load()
+					sieveRej := totalSieveRejected.Load()
+					
+					if verbose && attempts > lastAttempts {
+						fmt.Fprintf(os.Stderr, ".")
+					}
+					
+					if callback != nil {
+						callback(int(attempts), int(sieveRej))
+					}
+					
+					lastAttempts = attempts
+					
+				case <-progressDone:
+					return
+				}
+			}
+		}()
+	}
 
 	// Start worker goroutines
 	for i := 0; i < threads; i++ {
@@ -420,17 +465,10 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 		go func(workerID int) {
 			defer wg.Done()
 
-			localAttempts := 0
-			localSieveRejected := 0
-			const updateInterval = 5000 // Reduce atomic operation frequency
-
 			for {
-				// Check context cancellation (critical for resource cleanup)
+				// Check context cancellation FIRST (critical for resource cleanup)
 				select {
 				case <-workerCtx.Done():
-					// Add local counters to global before exiting
-					totalAttempts.Add(int64(localAttempts))
-					totalSieveRejected.Add(int64(localSieveRejected))
 					return
 				default:
 				}
@@ -445,20 +483,12 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 				p := new(big.Int).Mul(q, big.NewInt(2))
 				p.Add(p, big.NewInt(1))
 
-				localAttempts++
+				// Atomic increment for precise counting
+				totalAttempts.Add(1)
 
 				// Small prime sieve: quick test to eliminate >90% of composites
 				if isProbablyComposite(p) {
-					localSieveRejected++
-					
-					// Periodic progress update (less frequent to reduce overhead)
-					if callback != nil && localAttempts%updateInterval == 0 {
-						totalAttempts.Add(int64(localAttempts))
-						totalSieveRejected.Add(int64(localSieveRejected))
-						callback(int(totalAttempts.Load()), int(totalSieveRejected.Load()))
-						localAttempts = 0
-						localSieveRejected = 0
-					}
+					totalSieveRejected.Add(1)
 					continue
 				}
 
@@ -467,6 +497,7 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 				qVerified, isSafe := isSafePrime(p, true)
 				if isSafe {
 					// Try to send result (First-Past-The-Post)
+					// Non-blocking write with select
 					select {
 					case resultCh <- result{p: p, q: qVerified}:
 						// This worker won! Cancel all others immediately
@@ -476,15 +507,6 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 						// Another worker already won
 						return
 					}
-				}
-
-				// Periodic progress update (less frequent)
-				if callback != nil && localAttempts%updateInterval == 0 {
-					totalAttempts.Add(int64(localAttempts))
-					totalSieveRejected.Add(int64(localSieveRejected))
-					callback(int(totalAttempts.Load()), int(totalSieveRejected.Load()))
-					localAttempts = 0
-					localSieveRejected = 0
 				}
 			}
 		}(i)
@@ -500,18 +522,26 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 		// Context cancelled, stop all workers
 		cancelWorkers()
 		wg.Wait()
+		if progressDone != nil {
+			close(progressDone)
+		}
 		return nil, nil, ctx.Err()
 	}
 
 	// Wait for all workers to finish cleanup
 	wg.Wait()
+	
+	// Stop progress reporting
+	if progressDone != nil {
+		close(progressDone)
+	}
 
 	if verbose {
 		elapsed := time.Since(start)
 		attempts := int(totalAttempts.Load())
 		sieveRejected := int(totalSieveRejected.Load())
 		
-		fmt.Fprintf(os.Stderr, "\nGenerated safe prime after ~%d attempts (~%d sieve-rejected) in %v using %d threads\n",
+		fmt.Fprintf(os.Stderr, "\nGenerated safe prime after %d attempts (%d sieve-rejected) in %v using %d threads\n",
 			attempts, sieveRejected, elapsed, threads)
 		if attempts > 0 {
 			fmt.Fprintf(os.Stderr, "Sieve efficiency: %.1f%% candidates eliminated\n",
