@@ -29,7 +29,7 @@ jobs:
 
     - name: Test
       run: |
-        for i in $(seq 1 4); do 
+        for i in $(seq 1 8); do 
             time dhparam -T $(nproc) -out /tmp/dhparam$(($i * 1024)).pem  $(($i * 1024))
             sleep 2
             echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
