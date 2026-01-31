@@ -375,7 +375,8 @@ func generateDHParams(bits, generator, threads int, verbose bool) (*DHParams, er
 // Examples:
 // - 1024-bit: security=80 bits → recommended=175 bits
 // - 2048-bit: security=112 bits → recommended=225 bits
-// - 3072-bit: security=128 bits → recommended=280 bits
+// - 3072-bit: security=128 bits → recommended=275 bits
+// - 7680-bit: security=192 bits → recommended=400 bits
 func calculatePrivateLength(modulusBits int) int {
 	// Step 1: Estimate security bits using NIST SP 800-56B rev. 2 formula
 	// This is implemented in ossl_ifc_ffc_compute_security_bits()
