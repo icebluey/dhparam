@@ -67,15 +67,18 @@ func isSafePrime(p *big.Int, qAlreadyPrime bool) (q *big.Int, isSafe bool) {
 	return q, true
 }
 
-// Extended prime sieve for faster combined filtering
-var (
-	primesSieve []*big.Int
-	primesMod   []uint64
-)
+// smallPrime represents a small prime for optimized sieving
+type smallPrime struct {
+	val uint64
+}
+
+// Optimized prime sieve cache
+var smallPrimes []smallPrime
 
 func init() {
-	// Generate primes up to 10000 using Sieve of Eratosthenes
-	limit := 10000
+	// Generate primes up to 65536 using Sieve of Eratosthenes
+	// Larger sieve filters out more candidates before expensive Miller-Rabin
+	limit := 65536
 	isPrime := make([]bool, limit)
 	for i := 2; i < limit; i++ {
 		isPrime[i] = true
@@ -89,14 +92,11 @@ func init() {
 		}
 	}
 
-	// Collect primes into arrays
-	primesSieve = make([]*big.Int, 0, 1229)
-	primesMod = make([]uint64, 0, 1229)
-
-	for i := 2; i < limit; i++ {
+	// Collect primes, starting from 3 (we handle even numbers by stepping +2)
+	smallPrimes = make([]smallPrime, 0, 6500)
+	for i := 3; i < limit; i++ {
 		if isPrime[i] {
-			primesSieve = append(primesSieve, big.NewInt(int64(i)))
-			primesMod = append(primesMod, uint64(i))
+			smallPrimes = append(smallPrimes, smallPrime{val: uint64(i)})
 		}
 	}
 }
@@ -252,43 +252,117 @@ func run(opts *Options) error {
 	return nil
 }
 
-// fastCheckCombinedSieve checks if q or 2q+1 is divisible by small primes.
-// Returns true if CANDIDATE IS BAD (composite), false if likely prime.
-func fastCheckCombinedSieve(q *big.Int) bool {
-	// Logic:
-	// 1. If q % prime == 0, then q is composite -> reject
-	// 2. If (2q + 1) % prime == 0, then p is composite -> reject
-	//    Formula: 2q ≡ -1 (mod prime) → 2q ≡ prime - 1 (mod prime) → q ≡ (prime-1)/2 (mod prime)
-	//    So we only need to check if q % prime == (prime-1)/2
-	
-	// Note: big.Int.Rem for small int64 is still orders of magnitude faster than Miller-Rabin
-	// although there is some allocation overhead in the loop
-	
-	var rem big.Int
-	
-	for i, pVal := range primesMod {
-		// Skip 2 since q is always odd
-		if pVal == 2 {
-			continue
-		}
+// sieveCandidate manages state for incremental sieving
+// This is the KEY optimization: instead of generating new random numbers,
+// we scan a window of candidates using fast uint64 arithmetic
+type sieveCandidate struct {
+	base     *big.Int // Starting random number
+	rem      []uint64 // Current remainders: rem[i] = candidate % smallPrimes[i]
+	delta    int      // How much we have added to base
+	maxDelta int      // When to give up and pick new random number
+}
 
-		// Calculate r = q % prime
-		rem.Rem(q, primesSieve[i])
-		r := rem.Uint64()
+// newSieveCandidate creates a new sieve window starting from a random q
+func newSieveCandidate(bits int) (*sieveCandidate, error) {
+	// 1. Generate random odd q
+	q := new(big.Int)
+	one := big.NewInt(1)
 
-		// Check 1: Is q divisible by this prime?
-		if r == 0 {
-			return true
-		}
+	// Calculate bytes needed
+	qBytesLen := (bits-1 + 7) / 8
+	b := make([]byte, qBytesLen)
 
-		// Check 2: Is p = 2q+1 divisible by this prime?
-		// Equivalent to checking if r == (prime-1)/2
-		if r == (pVal-1)/2 {
-			return true
+	_, err := rand.Read(b)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set high/low bits
+	b[0] |= 0x80
+	b[len(b)-1] |= 1
+	q.SetBytes(b)
+
+	// Fix bit length
+	if q.BitLen() > bits-1 {
+		q.Rsh(q, uint(q.BitLen()-(bits-1)))
+		if q.Bit(0) == 0 {
+			q.Or(q, one)
 		}
 	}
-	
-	return false
+
+	// 2. Pre-calculate remainders for all small primes
+	// This is the ONLY time we do BigInt division in initialization
+	rems := make([]uint64, len(smallPrimes))
+	tmp := new(big.Int)
+
+	for i, p := range smallPrimes {
+		tmp.SetUint64(p.val)
+		tmp.Mod(q, tmp)
+		rems[i] = tmp.Uint64()
+	}
+
+	// Search window size
+	// For larger bit sizes, safe primes are very rare
+	// We scan a large range before generating new random number
+	return &sieveCandidate{
+		base:     q,
+		rem:      rems,
+		delta:    0,
+		maxDelta: 1000000, // Check 1 million candidates per random gen
+	}, nil
+}
+
+// next finds the next likely candidate using ONLY uint64 arithmetic
+// Returns delta (offset from base) or -1 if sieve window exhausted
+// This function contains NO big.Int operations - only fast uint64 ops
+func (s *sieveCandidate) next() int {
+	// We step by 2 to keep numbers odd
+	step := uint64(2)
+
+	for s.delta < s.maxDelta {
+		isGood := true
+
+		// Update remainders and check sieve
+		// This loop is PURE uint64 arithmetic - extremely fast!
+		for i := range smallPrimes {
+			pVal := smallPrimes[i].val
+
+			// Update remainder: r = (r + 2) % prime
+			r := s.rem[i] + step
+			if r >= pVal {
+				r -= pVal
+			}
+			s.rem[i] = r // Save for next iteration
+
+			// Check 1: Is q divisible by prime? (r == 0)
+			if r == 0 {
+				isGood = false
+				break
+			}
+
+			// Check 2: Is p = 2q+1 divisible by prime?
+			// p = 2q + 1, where q = k*prime + r
+			// p = 2(k*prime + r) + 1 = 2*k*prime + 2r + 1
+			// p % prime = (2r + 1) % prime
+			val2r1 := (r << 1) + 1 // 2*r + 1
+			if val2r1 >= pVal {
+				val2r1 %= pVal
+			}
+
+			if val2r1 == 0 {
+				isGood = false
+				break
+			}
+		}
+
+		s.delta += 2
+
+		if isGood {
+			return s.delta
+		}
+	}
+
+	return -1 // Window exhausted
 }
 
 // GenerateWithContext generates DH parameters with context support and progress callback
@@ -441,20 +515,17 @@ func computeSecurityBits(modulusBits int) int {
 }
 
 // generateSafePrimeWithContext generates a safe prime using single thread with context support
-// Optimized version: generate random q, then filter both q and p=2q+1 simultaneously
+// Optimized version using incremental sieving with uint64 arithmetic
 func generateSafePrimeWithContext(ctx context.Context, bits int, callback ProgressCallback, verbose bool) (*big.Int, *big.Int, error) {
 	start := time.Now()
-	attempts := 0
-	sieveRejected := 0
+	totalAttempts := 0
+	sieveWindowsCount := 0
 
-	// Pre-allocate memory
-	q := new(big.Int)
-	p := new(big.Int)
+	// Reusable big ints to reduce allocation
+	qCandidate := new(big.Int)
+	pCandidate := new(big.Int)
+	deltaBig := new(big.Int)
 	one := big.NewInt(1)
-
-	// Calculate bytes needed for q (bits-1 bits)
-	qBytesLen := (bits-1 + 7) / 8
-	b := make([]byte, qBytesLen)
 
 	for {
 		// Check context cancellation
@@ -464,125 +535,105 @@ func generateSafePrimeWithContext(ctx context.Context, bits int, callback Progre
 		default:
 		}
 
-		attempts++
-
-		// 1. Generate random candidate q (just random bytes, no primality test yet)
-		_, err := rand.Read(b)
+		// 1. Start a new Sieve Window
+		sieve, err := newSieveCandidate(bits)
 		if err != nil {
 			return nil, nil, err
 		}
+		sieveWindowsCount++
 
-		// Ensure highest bit is set (guarantee correct bit length)
-		b[0] |= 0x80
-		// Ensure lowest bit is set (guarantee odd number)
-		b[len(b)-1] |= 1
-
-		q.SetBytes(b)
-
-		// Handle bit length precision (if not multiple of 8)
-		if q.BitLen() > bits-1 {
-			q.Rsh(q, uint(q.BitLen()-(bits-1)))
-			if q.Bit(0) == 0 { // Might become even after shift
-				q.Or(q, one)
-			}
-		}
-
-		// 2. Combined Sieve: filter both q and p=2q+1 simultaneously
-		// This is VERY fast and filters out 99.9% of candidates
-		if fastCheckCombinedSieve(q) {
-			sieveRejected++
-			if verbose && attempts%2000 == 0 {
-				fmt.Fprintf(os.Stderr, ".")
-			}
-			continue
-		}
-
-		// 3. At this point, neither q nor 2q+1 has small factors
-		// Check if q is prime (20 rounds sufficient)
-		if !q.ProbablyPrime(20) {
-			if verbose && attempts%100 == 0 {
-				fmt.Fprintf(os.Stderr, ".")
-			}
-			continue
-		}
-
-		// 4. Calculate p = 2q + 1
-		p.Lsh(q, 1)    // p = 2*q
-		p.Add(p, one)  // p = p + 1
-
-		// 5. Check if p is prime (cryptographic strength, 64 rounds)
-		// Success rate is much higher now!
-		if p.ProbablyPrime(64) {
-			if verbose {
-				elapsed := time.Since(start)
-				fmt.Fprintf(os.Stderr, "\nGenerated safe prime after %d attempts (%d sieve-rejected) in %v\n",
-					attempts, sieveRejected, elapsed)
-				if attempts > 0 {
-					fmt.Fprintf(os.Stderr, "Sieve efficiency: %.1f%% candidates eliminated\n",
-						float64(sieveRejected)/float64(attempts)*100)
+		// 2. Scan the window using fast uint64 arithmetic
+		for {
+			// Check context periodically
+			if sieve.delta%10000 == 0 {
+				select {
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				default:
 				}
 			}
-			return p, q, nil
-		}
 
-		// Progress reporting
-		if callback != nil && attempts%1000 == 0 {
-			callback(attempts, sieveRejected)
-		}
-		if verbose && attempts%2000 == 0 {
-			fmt.Fprintf(os.Stderr, ".")
+			// Get next candidate offset using fast uint64 sieve
+			delta := sieve.next()
+			if delta == -1 {
+				// Window exhausted, generate new random base
+				if verbose {
+					fmt.Fprintf(os.Stderr, "+")
+				}
+				break
+			}
+
+			// We found a candidate that passed small primes check!
+			// Reconstruct the actual BigInt: q = base + delta
+			deltaBig.SetInt64(int64(delta))
+			qCandidate.Add(sieve.base, deltaBig)
+
+			totalAttempts++
+
+			// 3. Miller-Rabin Check on q (Expensive but necessary)
+			if !qCandidate.ProbablyPrime(20) {
+				continue
+			}
+
+			// 4. Calculate p = 2q + 1
+			pCandidate.Lsh(qCandidate, 1)
+			pCandidate.Add(pCandidate, one)
+
+			// 5. Miller-Rabin Check on p (Very Expensive)
+			if pCandidate.ProbablyPrime(64) {
+				// Found it!
+				if verbose {
+					elapsed := time.Since(start)
+					fmt.Fprintf(os.Stderr, "\nGenerated safe prime after %d MR tests (%d sieve windows) in %v\n",
+						totalAttempts, sieveWindowsCount, elapsed)
+				}
+				return pCandidate, qCandidate, nil
+			}
+
+			// Progress reporting
+			if callback != nil && totalAttempts%1000 == 0 {
+				callback(totalAttempts, 0)
+			}
 		}
 	}
 }
 
-// generateSafePrimeParallelWithContext generates a safe prime using multiple threads with First-Past-The-Post model
-// Optimized version: generate random q, then filter both q and p=2q+1 simultaneously
+// generateSafePrimeParallelWithContext generates a safe prime using multiple threads
+// Optimized version using incremental sieving with uint64 arithmetic
 func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int, callback ProgressCallback, verbose bool) (*big.Int, *big.Int, error) {
 	start := time.Now()
 
-	// Result structure
 	type result struct {
 		p *big.Int
 		q *big.Int
 	}
 
-	// Use buffered channel with capacity 1 for First-Past-The-Post
 	resultCh := make(chan result, 1)
-
-	// Create cancellable context for workers
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
 
 	var wg sync.WaitGroup
-
-	// Precise counters using atomic operations
 	var totalAttempts atomic.Int64
-	var totalSieveRejected atomic.Int64
+	var totalSieveWindows atomic.Int64
 
-	// Progress reporting goroutine (centralized output)
+	// Progress reporting
 	progressDone := make(chan struct{})
 	if verbose || callback != nil {
 		go func() {
 			ticker := time.NewTicker(2 * time.Second)
 			defer ticker.Stop()
 			lastAttempts := int64(0)
-
 			for {
 				select {
 				case <-ticker.C:
 					attempts := totalAttempts.Load()
-					sieveRej := totalSieveRejected.Load()
-
 					if verbose && attempts > lastAttempts {
-						fmt.Fprintf(os.Stderr, ".")
+						fmt.Fprintf(os.Stderr, "+")
 					}
-
 					if callback != nil {
-						callback(int(attempts), int(sieveRej))
+						callback(int(attempts), int(totalSieveWindows.Load()))
 					}
-
 					lastAttempts = attempts
-
 				case <-progressDone:
 					return
 				}
@@ -590,92 +641,87 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 		}()
 	}
 
-	// Start worker goroutines
 	for i := 0; i < threads; i++ {
 		wg.Add(1)
-		go func(workerID int) {
+		go func() {
 			defer wg.Done()
 
-			// Pre-allocate memory for this worker
-			q := new(big.Int)
-			p := new(big.Int)
+			// Reusable big ints to reduce allocation
+			qCandidate := new(big.Int)
+			pCandidate := new(big.Int)
+			deltaBig := new(big.Int)
 			one := big.NewInt(1)
 
-			// Calculate bytes needed for q
-			qBytesLen := (bits-1 + 7) / 8
-			b := make([]byte, qBytesLen)
-
 			for {
-				// Check context cancellation FIRST
 				select {
 				case <-workerCtx.Done():
 					return
 				default:
 				}
 
-				// 1. Generate random candidate q
-				_, err := rand.Read(b)
+				// 1. Start a new Sieve Window
+				sieve, err := newSieveCandidate(bits)
 				if err != nil {
 					continue
 				}
+				totalSieveWindows.Add(1)
 
-				// Ensure highest bit is set and number is odd
-				b[0] |= 0x80
-				b[len(b)-1] |= 1
-
-				q.SetBytes(b)
-
-				// Handle bit length precision
-				if q.BitLen() > bits-1 {
-					q.Rsh(q, uint(q.BitLen()-(bits-1)))
-					if q.Bit(0) == 0 {
-						q.Or(q, one)
+				// 2. Scan the window using fast uint64 arithmetic
+				for {
+					// Check context periodically
+					if sieve.delta%1000 == 0 {
+						select {
+						case <-workerCtx.Done():
+							return
+						default:
+						}
 					}
-				}
 
-				// Atomic increment for precise counting
-				totalAttempts.Add(1)
+					// Get next candidate offset using fast uint64 sieve
+					delta := sieve.next()
+					if delta == -1 {
+						// Window exhausted, generate new random base
+						break
+					}
 
-				// 2. Combined Sieve: filter both q and p=2q+1
-				if fastCheckCombinedSieve(q) {
-					totalSieveRejected.Add(1)
-					continue
-				}
+					// We found a candidate that passed small primes check!
+					// Reconstruct the actual BigInt: q = base + delta
+					deltaBig.SetInt64(int64(delta))
+					qCandidate.Add(sieve.base, deltaBig)
 
-				// 3. Check if q is prime (20 rounds)
-				if !q.ProbablyPrime(20) {
-					continue
-				}
+					totalAttempts.Add(1)
 
-				// 4. Calculate p = 2q + 1
-				p.Lsh(q, 1)
-				p.Add(p, one)
+					// 3. Miller-Rabin Check on q (Expensive)
+					if !qCandidate.ProbablyPrime(20) {
+						continue
+					}
 
-				// 5. Check if p is prime (64 rounds for cryptographic strength)
-				if p.ProbablyPrime(64) {
-					// Try to send result (First-Past-The-Post)
-					select {
-					case resultCh <- result{p: new(big.Int).Set(p), q: new(big.Int).Set(q)}:
-						// This worker won! Cancel all others immediately
-						cancelWorkers()
-						return
-					case <-workerCtx.Done():
-						// Another worker already won
-						return
+					// 4. Calculate p = 2q + 1
+					pCandidate.Lsh(qCandidate, 1)
+					pCandidate.Add(pCandidate, one)
+
+					// 5. Miller-Rabin Check on p (Very Expensive)
+					if pCandidate.ProbablyPrime(64) {
+						// Found it!
+						select {
+						case resultCh <- result{p: new(big.Int).Set(pCandidate), q: new(big.Int).Set(qCandidate)}:
+							cancelWorkers()
+							return
+						case <-workerCtx.Done():
+							return
+						}
 					}
 				}
 			}
-		}(i)
+		}()
 	}
 
-	// Wait for first result or context cancellation
+	// Wait for result
 	var res result
 	select {
 	case res = <-resultCh:
-		// Got result, cancel all workers
 		cancelWorkers()
 	case <-ctx.Done():
-		// Context cancelled, stop all workers
 		cancelWorkers()
 		wg.Wait()
 		if progressDone != nil {
@@ -684,10 +730,7 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 		return nil, nil, ctx.Err()
 	}
 
-	// Wait for all workers to finish cleanup
 	wg.Wait()
-
-	// Stop progress reporting
 	if progressDone != nil {
 		close(progressDone)
 	}
@@ -695,14 +738,9 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 	if verbose {
 		elapsed := time.Since(start)
 		attempts := int(totalAttempts.Load())
-		sieveRejected := int(totalSieveRejected.Load())
-
-		fmt.Fprintf(os.Stderr, "\nGenerated safe prime after %d attempts (%d sieve-rejected) in %v using %d threads\n",
-			attempts, sieveRejected, elapsed, threads)
-		if attempts > 0 {
-			fmt.Fprintf(os.Stderr, "Sieve efficiency: %.1f%% candidates eliminated\n",
-				float64(sieveRejected)/float64(attempts)*100)
-		}
+		windows := int(totalSieveWindows.Load())
+		fmt.Fprintf(os.Stderr, "\nGenerated safe prime after %d MR tests (%d sieve windows) in %v using %d threads\n",
+			attempts, windows, elapsed, threads)
 	}
 
 	return res.p, res.q, nil
