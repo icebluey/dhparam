@@ -253,55 +253,36 @@ func run(opts *Options) error {
 }
 
 // fastCheckCombinedSieve checks if q or 2q+1 is divisible by small primes.
-// Returns true if candidate is BAD (composite), false if likely prime.
-// This is the KEY optimization: filter both q and p=2q+1 simultaneously
+// Returns true if CANDIDATE IS BAD (composite), false if likely prime.
 func fastCheckCombinedSieve(q *big.Int) bool {
-	// For optimal performance with big numbers, we use a hybrid approach:
-	// 1. For very small primes (< 256), we can often use uint64 shortcuts
-	// 2. For larger primes or large q, we use big.Int.Mod but reuse the result
+	// Logic:
+	// 1. If q % prime == 0, then q is composite -> reject
+	// 2. If (2q + 1) % prime == 0, then p is composite -> reject
+	//    Formula: 2q ≡ -1 (mod prime) → 2q ≡ prime - 1 (mod prime) → q ≡ (prime-1)/2 (mod prime)
+	//    So we only need to check if q % prime == (prime-1)/2
 	
-	// Fast path for small q that fits in uint64
-	if q.IsUint64() {
-		qVal := q.Uint64()
-		for _, pVal := range primesMod {
-			if pVal == 2 {
-				continue // q is always odd
-			}
-			
-			r := qVal % pVal
-			
-			// Check 1: q divisible by prime?
-			if r == 0 {
-				return true
-			}
-			
-			// Check 2: p = 2q+1 divisible by prime?
-			// i.e., 2q ≡ -1 (mod prime) → q ≡ (prime-1)/2 (mod prime)
-			if r == (pVal-1)/2 {
-				return true
-			}
-		}
-		return false
-	}
+	// Note: big.Int.Rem for small int64 is still orders of magnitude faster than Miller-Rabin
+	// although there is some allocation overhead in the loop
 	
-	// Slow path for large q (but still faster than Miller-Rabin)
 	var rem big.Int
+	
 	for i, pVal := range primesMod {
+		// Skip 2 since q is always odd
 		if pVal == 2 {
 			continue
 		}
-		
-		rem.Mod(q, primesSieve[i])
-		
-		// Convert to uint64 for comparison (safe since prime < 10000)
+
+		// Calculate r = q % prime
+		rem.Rem(q, primesSieve[i])
 		r := rem.Uint64()
-		
-		// Check 1: q divisible by prime?
+
+		// Check 1: Is q divisible by this prime?
 		if r == 0 {
 			return true
 		}
-		
-		// Check 2: p = 2q+1 divisible by prime?
+
+		// Check 2: Is p = 2q+1 divisible by this prime?
+		// Equivalent to checking if r == (prime-1)/2
 		if r == (pVal-1)/2 {
 			return true
 		}
