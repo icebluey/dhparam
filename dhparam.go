@@ -515,87 +515,9 @@ func computeSecurityBits(modulusBits int) int {
 }
 
 // generateSafePrimeWithContext generates a safe prime using single thread with context support
-// Optimized version using incremental sieving with uint64 arithmetic
+// Simplified: just calls the parallel version with threads=1 to avoid code duplication
 func generateSafePrimeWithContext(ctx context.Context, bits int, callback ProgressCallback, verbose bool) (*big.Int, *big.Int, error) {
-	start := time.Now()
-	totalAttempts := 0
-	sieveWindowsCount := 0
-
-	// Reusable big ints to reduce allocation
-	qCandidate := new(big.Int)
-	pCandidate := new(big.Int)
-	deltaBig := new(big.Int)
-	one := big.NewInt(1)
-
-	for {
-		// Check context cancellation
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		default:
-		}
-
-		// 1. Start a new Sieve Window
-		sieve, err := newSieveCandidate(bits)
-		if err != nil {
-			return nil, nil, err
-		}
-		sieveWindowsCount++
-
-		// 2. Scan the window using fast uint64 arithmetic
-		for {
-			// Check context periodically
-			if sieve.delta%10000 == 0 {
-				select {
-				case <-ctx.Done():
-					return nil, nil, ctx.Err()
-				default:
-				}
-			}
-
-			// Get next candidate offset using fast uint64 sieve
-			delta := sieve.next()
-			if delta == -1 {
-				// Window exhausted, generate new random base
-				if verbose {
-					fmt.Fprintf(os.Stderr, "+")
-				}
-				break
-			}
-
-			// We found a candidate that passed small primes check!
-			// Reconstruct the actual BigInt: q = base + delta
-			deltaBig.SetInt64(int64(delta))
-			qCandidate.Add(sieve.base, deltaBig)
-
-			totalAttempts++
-
-			// 3. Miller-Rabin Check on q (Expensive but necessary)
-			if !qCandidate.ProbablyPrime(20) {
-				continue
-			}
-
-			// 4. Calculate p = 2q + 1
-			pCandidate.Lsh(qCandidate, 1)
-			pCandidate.Add(pCandidate, one)
-
-			// 5. Miller-Rabin Check on p (Very Expensive)
-			if pCandidate.ProbablyPrime(64) {
-				// Found it!
-				if verbose {
-					elapsed := time.Since(start)
-					fmt.Fprintf(os.Stderr, "\nGenerated safe prime after %d MR tests (%d sieve windows) in %v\n",
-						totalAttempts, sieveWindowsCount, elapsed)
-				}
-				return pCandidate, qCandidate, nil
-			}
-
-			// Progress reporting
-			if callback != nil && totalAttempts%1000 == 0 {
-				callback(totalAttempts, 0)
-			}
-		}
-	}
+	return generateSafePrimeParallelWithContext(ctx, bits, 1, callback, verbose)
 }
 
 // generateSafePrimeParallelWithContext generates a safe prime using multiple threads
