@@ -23,6 +23,7 @@ jobs:
 
     - name: Build
       run: |
+        go env -w GOAMD64='v3'
         go env
         gofmt -w dhparam.go
         CGO_ENABLED=0 GOARCH=amd64 GOAMD64=v3 go build -trimpath -ldflags "-s -w" -mod=mod -o /usr/local/bin/dhparam dhparam.go
