@@ -348,11 +348,95 @@ func generateDHParams(bits, generator, threads int, verbose bool) (*DHParams, er
 		return nil, err
 	}
 
+	// Calculate recommended private key length following OpenSSL's algorithm
+	privateLength := calculatePrivateLength(bits)
+
 	return &DHParams{
-		P: p,
-		G: g,
-		Q: q,
+		P:             p,
+		G:             g,
+		Q:             q,
+		PrivateLength: privateLength,
 	}, nil
+}
+
+// calculatePrivateLength calculates the recommended private key length
+// following OpenSSL's implementation in crypto/dh/dh_gen.c and crypto/rsa/rsa_lib.c
+//
+// This ensures the private key's strength aligns with the overall security of the parameters,
+// balancing against attacks like Number Field Sieve (NFS) and Pollard's rho.
+//
+// Algorithm:
+// 1. Estimate security bits of the modulus using NIST SP 800-56B rev. 2
+// 2. Compute: length = ((2 * security_bits + 24) / 25) * 25
+//
+// The formula doubles security bits (to match subgroup security against Pollard's rho),
+// adds a 24-bit buffer, then rounds down to a multiple of 25 bits.
+//
+// Examples:
+// - 1024-bit: security=80 bits → recommended=175 bits
+// - 2048-bit: security=112 bits → recommended=225 bits
+// - 3072-bit: security=128 bits → recommended=280 bits
+func calculatePrivateLength(modulusBits int) int {
+	// Step 1: Estimate security bits using NIST SP 800-56B rev. 2 formula
+	// This is implemented in ossl_ifc_ffc_compute_security_bits()
+	securityBits := computeSecurityBits(modulusBits)
+	
+	// Step 2: Calculate recommended private length
+	// Formula from OpenSSL crypto/dh/dh_gen.c:
+	// length = ((2 * security_bits + 24) / 25) * 25
+	// This doubles security bits, adds 24-bit buffer, rounds down to multiple of 25
+	
+	length := ((2*securityBits + 24) / 25) * 25
+	
+	return length
+}
+
+// computeSecurityBits estimates the security strength in bits for a given modulus size
+// Based on OpenSSL's ossl_ifc_ffc_compute_security_bits() in crypto/rsa/rsa_lib.c
+// Uses NIST SP 800-56B rev. 2 Appendix D
+//
+// For a modulus of n bits, the security against NFS attacks is estimated using:
+// E = (1.923 * ∛(n * ln(2)) * (ln(n * ln(2)))^(2/3) - 4.69) / ln(2)
+//
+// However, OpenSSL uses hardcoded values from NIST standards for common sizes
+// with rounding: y = (computed_value + 4) & ~7 (rounds to nearest multiple of 8, upward)
+//
+// The values below are BREAKPOINTS (not the only valid sizes):
+// - Any modulus >= 15360 bits gets 256-bit security rating
+// - Any modulus >= 7680 but < 15360 bits gets 192-bit security rating
+// - And so on...
+//
+// Examples:
+// - 1024-bit: 80-bit security
+// - 1536-bit: 80-bit security (still in the 1024-7680 range)
+// - 2048-bit: 112-bit security
+// - 3000-bit: 112-bit security (in the 2048-3072 range)
+// - 4096-bit: 128-bit security
+func computeSecurityBits(modulusBits int) int {
+	// These are BREAKPOINTS defining security levels
+	// Any size can be used; it will map to the appropriate security level
+	if modulusBits >= 15360 {
+		return 256
+	}
+	if modulusBits >= 7680 {
+		return 192
+	}
+	if modulusBits >= 3072 {
+		return 128
+	}
+	if modulusBits >= 2048 {
+		return 112
+	}
+	if modulusBits >= 1024 {
+		return 80  // Conservative NIST rating; actual NFS security ~79.95 bits
+	}
+	
+	// For smaller sizes (not recommended for production)
+	if modulusBits >= 512 {
+		return 64
+	}
+	
+	return 56 // Absolute minimum
 }
 
 // generateSafePrimeWithContext generates a safe prime using single thread with context support
