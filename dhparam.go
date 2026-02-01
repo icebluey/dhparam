@@ -19,6 +19,7 @@ const (
 	DefaultBits      = 2048
 	DefaultGenerator = 2
 )
+// A fully compatible OpenSSL dhparam implementation in Go with multi-threaded acceleration support.
 
 // ProgressCallback is called during prime generation to report progress
 type ProgressCallback func(attempts int, sieveRejected int)
