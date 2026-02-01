@@ -76,8 +76,9 @@ var (
 )
 
 func init() {
-	// Generate primes up to 10000 using Sieve of Eratosthenes
-	limit := 10000
+	// OPTIMIZATION: Generate primes up to 100000 using Sieve of Eratosthenes
+	// Approximately 9592 primes under 100000, filtering more small factors to reduce Miller-Rabin calls
+	limit := 100000
 	isPrime := make([]bool, limit)
 	for i := 2; i < limit; i++ {
 		isPrime[i] = true
@@ -92,8 +93,9 @@ func init() {
 	}
 
 	// Collect primes into arrays
-	primesSieve = make([]*big.Int, 0, 1229)
-	primesMod = make([]uint64, 0, 1229)
+	// Prime count under 100000: 100000/ln(100000) ≈ 9592
+	primesSieve = make([]*big.Int, 0, 10000)
+	primesMod = make([]uint64, 0, 10000)
 
 	for i := 2; i < limit; i++ {
 		if isPrime[i] {
@@ -520,7 +522,7 @@ func generateSafePrimeWithContext(ctx context.Context, bits int, callback Progre
 				fmt.Fprintf(os.Stderr, "\nGenerated safe prime after %d attempts (%d sieve-rejected) in %v\n",
 					attempts, sieveRejected, elapsed)
 				if attempts > 0 {
-					fmt.Fprintf(os.Stderr, "Sieve efficiency: %.1f%% candidates eliminated\n",
+					fmt.Fprintf(os.Stderr, "Sieve efficiency: %.2f%% candidates eliminated\n",
 						float64(sieveRejected)/float64(attempts)*100)
 				}
 			}
@@ -702,7 +704,7 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 		fmt.Fprintf(os.Stderr, "\nGenerated safe prime after %d attempts (%d sieve-rejected) in %v using %d threads\n",
 			attempts, sieveRejected, elapsed, threads)
 		if attempts > 0 {
-			fmt.Fprintf(os.Stderr, "Sieve efficiency: %.1f%% candidates eliminated\n",
+			fmt.Fprintf(os.Stderr, "Sieve efficiency: %.2f%% candidates eliminated\n",
 				float64(sieveRejected)/float64(attempts)*100)
 		}
 	}
