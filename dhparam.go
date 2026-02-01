@@ -327,14 +327,8 @@ func (s *sieveCandidate) next() int {
 		for i := range smallPrimes {
 			pVal := smallPrimes[i].val
 
-			// Update remainder: r = (r + 2) % prime
-			r := s.rem[i] + step
-			if r >= pVal {
-				r -= pVal
-			}
-			s.rem[i] = r // Save for next iteration
-
 			// Check 1: Is q divisible by prime? (r == 0)
+			r := s.rem[i]
 			if r == 0 {
 				isGood = false
 				break
@@ -353,12 +347,21 @@ func (s *sieveCandidate) next() int {
 				isGood = false
 				break
 			}
+
+			// Update remainder for next iteration: r = (r + 2) % prime
+			r += step
+			if r >= pVal {
+				r -= pVal
+			}
+			s.rem[i] = r
 		}
 
+		// Save current delta before incrementing
+		currentDelta := s.delta
 		s.delta += 2
 
 		if isGood {
-			return s.delta
+			return currentDelta
 		}
 	}
 
@@ -615,13 +618,12 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 
 					// ============================================================
 					// Staged Primality Testing
-					// Most composites fail at the first Miller-Rabin test (Base 2)
-					// No need to waste time on 20 or 64 rounds if it fails early
 					// ============================================================
 
-					// Stage 1: Quick pre-screening on q with 1 round (Base 2 test)
-					// This eliminates ~99% of remaining composites very quickly
-					if !qCandidate.ProbablyPrime(1) {
+					// Stage 1: Test q first with fewer rounds
+					// Since q is (bits-1) bits, 20 rounds is sufficient
+					// Error probability: < 2^-40
+					if !qCandidate.ProbablyPrime(20) {
 						continue
 					}
 
@@ -629,26 +631,9 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 					pCandidate.Lsh(qCandidate, 1)
 					pCandidate.Add(pCandidate, one)
 
-					// Stage 3: Quick pre-screening on p with 1 round (Base 2 test)
-					// If p fails the first round, no point validating q strictly
-					if !pCandidate.ProbablyPrime(1) {
-						continue
-					}
-
-					// ============================================================
-					// At this point, both q and p passed Base 2 test
-					// They have extremely high probability of being prime
-					// NOW it's worth investing in strict validation
-					// ============================================================
-
-					// Stage 4: Strict validation of q (20 rounds for auxiliary prime)
-					// 20 rounds gives error probability < 2^-40 ≈ 10^-12
-					if !qCandidate.ProbablyPrime(20) {
-						continue
-					}
-
-					// Stage 5: Strict validation of p (64 rounds for safe prime)
-					// 64 rounds gives cryptographic strength: error probability < 2^-128
+					// Stage 3: Test p with full cryptographic strength
+					// 64 rounds for the actual safe prime we're generating
+					// Error probability: < 2^-128
 					if pCandidate.ProbablyPrime(64) {
 						// Found it!
 						select {
