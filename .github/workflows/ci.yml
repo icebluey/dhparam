@@ -35,7 +35,7 @@ jobs:
             sleep 2
             echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
             echo "Checking dhparam$(($i * 1024)).pem"
-            openssl dhparam -check -noout -in /tmp/dhparam$(($i * 1024)).pem 2>&1
+            openssl dhparam -check -text -noout -in /tmp/dhparam$(($i * 1024)).pem 2>&1
             sleep 2
             echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
         done
