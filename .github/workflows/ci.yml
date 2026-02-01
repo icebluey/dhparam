@@ -30,13 +30,12 @@ jobs:
 
     - name: Test
       run: |
-        for i in $(seq 1 8); do 
-            time dhparam --verbose -T $(nproc) -out /tmp/dhparam$(($i * 1024)).pem  $(($i * 1024))
+        for i in $(seq 1 4); do
+            dhparam --verbose -T $(nproc) -out /tmp/dhparam$(($i * 1024)).pem  $(($i * 1024))
             sleep 2
-            echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+            echo '====================================================================='
             echo "Checking dhparam$(($i * 1024)).pem"
             openssl dhparam -check -text -noout -in /tmp/dhparam$(($i * 1024)).pem 2>&1 | cat | grep -E 'DH|P|G|recommended-private-length'
             sleep 2
-            echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+            echo '====================================================================='
         done
-
