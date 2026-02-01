@@ -24,13 +24,14 @@ const (
 type ProgressCallback func(attempts int, sieveRejected int)
 
 // isSafePrime checks if p is a safe prime (p = 2q + 1 where both p and q are prime)
-// 
+//
 // Primality Testing Implementation:
 // Go's math/big.Int.ProbablyPrime(n) uses:
 // 1. Miller-Rabin test with n rounds
 // 2. For n >= 1, it's effectively a Baillie-PSW equivalent test:
-//    - First uses Miller-Rabin with base 2
-//    - Then uses additional pseudoprime tests
+//   - First uses Miller-Rabin with base 2
+//   - Then uses additional pseudoprime tests
+//
 // 3. With n=20: error probability < 2^(-40) = 10^(-12)
 // 4. With n=64: error probability < 2^(-128) = 10^(-38) (cryptographic strength)
 //
@@ -40,29 +41,29 @@ type ProgressCallback func(attempts int, sieveRejected int)
 func isSafePrime(p *big.Int, qAlreadyPrime bool) (q *big.Int, isSafe bool) {
 	one := big.NewInt(1)
 	two := big.NewInt(2)
-	
+
 	// Calculate q = (p - 1) / 2
 	q = new(big.Int).Sub(p, one)
 	q.Div(q, two)
-	
+
 	// Use different iteration counts based on context
 	// For p (the actual safe prime we're generating): use high iterations for security
 	// For q (already from rand.Prime): fewer iterations if we need to double-check
 	const pIterations = 64 // For p: cryptographic strength
 	const qIterations = 20 // For q: sufficient when double-checking rand.Prime output
-	
+
 	// If q was already verified by rand.Prime(), skip its test
 	if !qAlreadyPrime {
 		if !q.ProbablyPrime(qIterations) {
 			return nil, false
 		}
 	}
-	
+
 	// Check if p is prime (this is the expensive test we must always do)
 	if !p.ProbablyPrime(pIterations) {
 		return nil, false
 	}
-	
+
 	// Both p and q are prime, so p is a safe prime
 	return q, true
 }
@@ -102,26 +103,26 @@ func init() {
 }
 
 type Options struct {
-	InFile     string
-	OutFile    string
-	InFormat   string
-	OutFormat  string
-	Check      bool
-	Text       bool
-	NoOut      bool
-	Generator  int
-	Verbose    bool
-	Quiet      bool
-	Threads    int
-	NumBits    int
+	InFile    string
+	OutFile   string
+	InFormat  string
+	OutFormat string
+	Check     bool
+	Text      bool
+	NoOut     bool
+	Generator int
+	Verbose   bool
+	Quiet     bool
+	Threads   int
+	NumBits   int
 }
 
 // DHParams represents DH parameters
 type DHParams struct {
-	P              *big.Int // Prime
-	G              *big.Int // Generator
-	Q              *big.Int // Optional subprime (for DSA compatibility)
-	PrivateLength  int      // Optional recommended private key length in bits
+	P             *big.Int // Prime
+	G             *big.Int // Generator
+	Q             *big.Int // Optional subprime (for DSA compatibility)
+	PrivateLength int      // Optional recommended private key length in bits
 }
 
 func main() {
@@ -186,7 +187,7 @@ func parseFlags() *Options {
 	if opts.Threads < 1 {
 		opts.Threads = 1
 	}
-	
+
 	// Limit threads to reasonable maximum to avoid excessive goroutine creation
 	// Generally, more threads than 4x CPU cores shows diminishing returns
 	maxThreads := 256 // Absolute maximum
@@ -262,14 +263,14 @@ func fastCheckCombinedSieve(q *big.Int) bool {
 			if pVal == 2 {
 				continue // q is always odd
 			}
-			
+
 			r := qVal % pVal
-			
+
 			// Check 1: q divisible by prime?
 			if r == 0 {
 				return true
 			}
-			
+
 			// Check 2: p = 2q+1 divisible by prime?
 			// i.e., 2q ≡ -1 (mod prime) → q ≡ (prime-1)/2 (mod prime)
 			if r == (pVal-1)/2 {
@@ -278,28 +279,28 @@ func fastCheckCombinedSieve(q *big.Int) bool {
 		}
 		return false
 	}
-	
+
 	// Slow path for large q
 	var rem big.Int
 	for i, pVal := range primesMod {
 		if pVal == 2 {
 			continue
 		}
-		
+
 		rem.Rem(q, primesSieve[i])
 		r := rem.Uint64()
-		
+
 		// Check 1: q divisible by prime?
 		if r == 0 {
 			return true
 		}
-		
+
 		// Check 2: p = 2q+1 divisible by prime?
 		if r == (pVal-1)/2 {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -393,14 +394,14 @@ func calculatePrivateLength(modulusBits int) int {
 	// Step 1: Estimate security bits using NIST SP 800-56B rev. 2 formula
 	// This is implemented in ossl_ifc_ffc_compute_security_bits()
 	securityBits := computeSecurityBits(modulusBits)
-	
+
 	// Step 2: Calculate recommended private length
 	// Formula from OpenSSL crypto/dh/dh_gen.c:
 	// length = ((2 * security_bits + 24) / 25) * 25
 	// This doubles security bits, adds 24-bit buffer, rounds down to multiple of 25
-	
+
 	length := ((2*securityBits + 24) / 25) * 25
-	
+
 	return length
 }
 
@@ -441,14 +442,14 @@ func computeSecurityBits(modulusBits int) int {
 		return 112
 	}
 	if modulusBits >= 1024 {
-		return 80  // Conservative NIST rating; actual NFS security ~79.95 bits
+		return 80 // Conservative NIST rating; actual NFS security ~79.95 bits
 	}
-	
+
 	// For smaller sizes (not recommended for production)
 	if modulusBits >= 512 {
 		return 64
 	}
-	
+
 	return 56 // Absolute minimum
 }
 
@@ -512,7 +513,7 @@ func generateSafePrimeParallelWithContext(ctx context.Context, bits, threads int
 			one := big.NewInt(1)
 
 			// Calculate bytes needed for q
-			qBytesLen := (bits-1 + 7) / 8
+			qBytesLen := (bits - 1 + 7) / 8
 			b := make([]byte, qBytesLen)
 
 			for {
@@ -636,13 +637,13 @@ func readDHParams(filename, format string) (*DHParams, error) {
 			if block == nil {
 				return nil, fmt.Errorf("failed to find DH PARAMETERS in PEM data")
 			}
-			
+
 			// Look for DH PARAMETERS block type
 			if block.Type == "DH PARAMETERS" {
 				derBytes = block.Bytes
 				break
 			}
-			
+
 			// Continue with remaining data
 			data = rest
 			if len(data) == 0 {
@@ -670,9 +671,9 @@ func parseDHParams(derBytes []byte) (*DHParams, error) {
 	// }
 
 	var params struct {
-		P              *big.Int
-		G              *big.Int
-		PrivateLength  int `asn1:"optional"`
+		P             *big.Int
+		G             *big.Int
+		PrivateLength int `asn1:"optional"`
 	}
 
 	_, err := asn1.Unmarshal(derBytes, &params)
@@ -749,13 +750,13 @@ func printDHParamsText(params *DHParams, w io.Writer) {
 
 func printHexValue(w io.Writer, n *big.Int) {
 	bytes := n.Bytes()
-	
+
 	// ASN.1 DER encoding rule: add leading 00 if high bit is set (to indicate positive number)
 	// This matches OpenSSL's display format
 	needsLeadingZero := len(bytes) > 0 && bytes[0]&0x80 != 0
-	
+
 	byteCount := 0
-	
+
 	// Print leading zero if needed
 	if needsLeadingZero {
 		fmt.Fprintf(w, "        00:")
@@ -763,23 +764,23 @@ func printHexValue(w io.Writer, n *big.Int) {
 	} else {
 		fmt.Fprintf(w, "        ")
 	}
-	
+
 	// Print actual bytes
 	for i := 0; i < len(bytes); i++ {
 		// Start new line every 15 bytes
 		if byteCount > 0 && byteCount%15 == 0 {
 			fmt.Fprintf(w, "\n        ")
 		}
-		
+
 		fmt.Fprintf(w, "%02x", bytes[i])
 		byteCount++
-		
+
 		// Add colon separator (except for last byte)
 		if i < len(bytes)-1 || (i == len(bytes)-1 && byteCount%15 == 0) {
 			fmt.Fprintf(w, ":")
 		}
 	}
-	
+
 	fmt.Fprintf(w, "\n")
 }
 
@@ -801,7 +802,7 @@ func checkDHParams(params *DHParams) error {
 		if !params.Q.ProbablyPrime(20) {
 			return fmt.Errorf("Q is not prime")
 		}
-		
+
 		// Verify P = 2Q + 1
 		two := big.NewInt(2)
 		expectedP := new(big.Int).Mul(params.Q, two)
@@ -809,14 +810,14 @@ func checkDHParams(params *DHParams) error {
 		if params.P.Cmp(expectedP) != 0 {
 			return fmt.Errorf("P != 2Q + 1")
 		}
-		
+
 		// Verify generator order: G^Q mod P should NOT equal 1
 		// This ensures G generates the full subgroup of order Q
 		result := new(big.Int).Exp(params.G, params.Q, params.P)
 		if result.Cmp(one) == 0 {
 			return fmt.Errorf("generator G has incorrect order (G^Q mod P = 1)")
 		}
-		
+
 		// Additional check: G^(2Q) mod P should equal 1 (G^(P-1) mod P = 1 by Fermat)
 		pMinus1 := new(big.Int).Sub(params.P, one)
 		result = new(big.Int).Exp(params.G, pMinus1, params.P)
